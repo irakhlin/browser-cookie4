@@ -23,4 +23,5 @@ setup(
     ],
     entry_points={'console_scripts': ['browser-cookie=browser_cookie4.__main__:main']},
     license_files=('LICENSE'),
+    options={'bdist_wheel':{'universal':1}}
 )
