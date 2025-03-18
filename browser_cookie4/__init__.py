@@ -26,7 +26,7 @@ is_wsl: bool = False
 DEBUG_PORT = 9222
 DEBUG_URL = f'http://localhost:{DEBUG_PORT}/json'
 
-if platform.uname().release.find("microsoft") >= 0:
+if platform.uname().release.find("microsoft") >= 0 and platform.uname().system.lower() != "windows":
     is_wsl = True
 
 if sys.platform.startswith('linux') or 'bsd' in sys.platform.lower():
