@@ -14,7 +14,6 @@ import subprocess
 import sys
 import tempfile
 import platform
-from numpy import argsort, int64, uint64
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -90,20 +89,25 @@ def _wsl_get_windows_env(env_var: str, wsl_path: bool = True):
     win_path = ps.communicate()[0].decode("utf-8").strip()
     if not wsl_path:
         return win_path
-        
     return _wsl_path_from_windows(win_path)
-#    ps1 = subprocess.Popen(['wslpath', '-au', win_path ],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-#    return ps1.communicate()[0].decode("utf-8").strip()
 
 def close_browser_wsl(bin_path):
     proc_name = Path(bin_path).name
     cmd = f"cmd.exe /c 'taskkill /F /IM {proc_name}'"
     ps = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=wsl_path_dict["C"]["linux_path"])
 
-def start_browser(bin_path, user_data_path):
+def close_browser(bin_path):
+    proc_name = Path(bin_path).name
+    cmd = f"cmd.exe /c 'taskkill /F /IM {proc_name}'"
+    ps = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+def start_browser_wsl(bin_path, user_data_path):
     windows_user_data_path = _wsl_path_from_wsl(user_data_path)
     cmds = [f"{bin_path}", "--restore-last-session", f"--remote-debugging-port={DEBUG_PORT}", "--remote-allow-origins=*", "--headless", f"--user-data-dir={windows_user_data_path}"]
-    cmd = f"'{bin_path}' --restore-last-session --remote-debugging-port={DEBUG_PORT} --remote-allow-origins=* --headless --user-data-dir='{windows_user_data_path}'"
+    subprocess.Popen(cmds, shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def start_browser(bin_path, user_data_path):
+    cmds = [f"{bin_path}", "--restore-last-session", f"--remote-debugging-port={DEBUG_PORT}", "--remote-allow-origins=*", "--headless", f"--user-data-dir='{user_data_path}'"]
     subprocess.Popen(cmds, shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
 def get_debug_ws_url():
@@ -123,21 +127,31 @@ def get_debug_ws_url():
 
     return data[0]['webSocketDebuggerUrl'].strip()
 
-def get_all_cookies(ws_url):
-    ws = websocket.create_connection(ws_url)
-    ws.send(json.dumps({'id': 1, 'method': 'Network.getAllCookies'}))
+def get_all_cookies(ws_url: str, domain_name: str):
+    ws = websocket.create_connection(ws_url, suppress_origin=True)
+    ws.send(json.dumps({'id': 1, 'method': 'Page.navigate', 'params': {'url': f'https://{domain_name}'}}))
+    ws.recv()
+    ws.send(json.dumps({'id': 2, 'method': 'Network.getAllCookies'}))
     response = ws.recv()
     response = json.loads(response)
     cookies = response['result']['cookies']
     ws.close()
     return cookies
 
-def get_all_chrome_based_cookies_wsl(bin_path, user_data_path):
+def get_all_chrome_based_cookies_wsl(bin_path: str, user_data_path: str, domain_name: str = "google.com"):
     close_browser_wsl(bin_path)
+    start_browser_wsl(bin_path, user_data_path)
+    ws_url = get_debug_ws_url()
+    cookies = get_all_cookies(ws_url=ws_url, domain_name=domain_name)
+    close_browser_wsl(bin_path)
+    return cookies
+
+def get_all_chrome_based_cookies(bin_path: str, user_data_path: str, domain_name: str = "google.com"):
+    close_browser(bin_path)
     start_browser(bin_path, user_data_path)
     ws_url = get_debug_ws_url()
-    cookies = get_all_cookies(ws_url)
-    close_browser_wsl(bin_path)
+    cookies = get_all_cookies(ws_url=ws_url, domain_name=domain_name)
+    close_browser(bin_path)
     return cookies
 
 # external dependencies
@@ -567,8 +581,13 @@ class ChromiumBased:
     def __add_key_and_cookie_file(self,
                                   linux_cookies=None, windows_cookies=None, osx_cookies=None,
                                   windows_keys=None, os_crypt_name=None, osx_key_service=None, osx_key_user=None,
+                                  wsl_bin_path=None, wsl_user_data=None,
                                   windows_bin_path=None, windows_user_data=None):
         if is_wsl:
+            self.bin_path = wsl_bin_path
+            self.user_data_path = wsl_user_data
+
+        if sys.platform == 'win32':
             self.bin_path = windows_bin_path
             self.user_data_path = windows_user_data
 
@@ -648,48 +667,62 @@ class ChromiumBased:
 
     def load(self):
         """Load sqlite cookies into a cookiejar"""
-        cj = http.cookiejar.CookieJar()
+        cj = http.cookiejar.MozillaCookieJar()
         
         if not is_wsl:
-            with _DatabaseConnetion(self.cookie_file) as con:
-                con.text_factory = _text_factory
-                cur = con.cursor()
-                has_integrity_check_for_cookie_domain = self._has_integrity_check_for_cookie_domain(cur)
-                try:
-                    # chrome <=55
-                    cur.execute('SELECT host_key, path, secure, expires_utc, name, value, encrypted_value, is_httponly '
-                                'FROM cookies WHERE host_key like ?;', ('%{}%'.format(self.domain_name),))
-                except sqlite3.OperationalError:
-                    try:
-                        # chrome >=56
-                        cur.execute('SELECT host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly '
-                                    'FROM cookies WHERE host_key like ?;', ('%{}%'.format(self.domain_name),))
-                    except sqlite3.OperationalError as e:
-                        if e.args[0].startswith(('no such table: ', 'file is not a database')):
-                            raise BrowserCookieError('File {} is not a Chromium-based browser cookie file'.format(self.tmp_cookie_file))
+            if sys.platform == 'win32':
+                all_cookies = get_all_chrome_based_cookies(bin_path=self.bin_path, user_data_path=self.user_data_path, domain_name=self.domain_name)
+                for item in all_cookies:
+                    if self.domain_name and self.domain_name != "":
+                        if self.domain_name not in item['domain']:
+                            continue
+                
+                    c = create_cookie(
+                        host=item['domain'],
+                        path=item['path'],
+                        secure=item['secure'],
+                        expires=int(item['expires'] if (item['expires'] and item['expires'] >= 0) else 0),
+                        name=item['name'],
+                        value=item['value'],
+                        http_only=item['httpOnly'])
+                    cj.set_cookie(c)
+            # with _DatabaseConnetion(self.cookie_file) as con:
+            #     con.text_factory = _text_factory
+            #     cur = con.cursor()
+            #     has_integrity_check_for_cookie_domain = self._has_integrity_check_for_cookie_domain(cur)
+            #     try:
+            #         # chrome <=55
+            #         cur.execute('SELECT host_key, path, secure, expires_utc, name, value, encrypted_value, is_httponly '
+            #                     'FROM cookies WHERE host_key like ?;', ('%{}%'.format(self.domain_name),))
+            #     except sqlite3.OperationalError:
+            #         try:
+            #             # chrome >=56
+            #             cur.execute('SELECT host_key, path, is_secure, expires_utc, name, value, encrypted_value, is_httponly '
+            #                         'FROM cookies WHERE host_key like ?;', ('%{}%'.format(self.domain_name),))
+            #         except sqlite3.OperationalError as e:
+            #             if e.args[0].startswith(('no such table: ', 'file is not a database')):
+            #                 raise BrowserCookieError('File {} is not a Chromium-based browser cookie file'.format(self.tmp_cookie_file))
 
 
-                for item in cur.fetchall():
-                    # Per https://github.com/chromium/chromium/blob/main/base/time/time.h#L5-L7,
-                    # Chromium-based browsers store cookies' expiration timestamps as MICROSECONDS elapsed
-                    # since the Windows NT epoch (1601-01-01 0:00:00 GMT), or 0 for session cookies.
-                    #
-                    # http.cookiejar stores cookies' expiration timestamps as SECONDS since the Unix epoch
-                    # (1970-01-01 0:00:00 GMT, or None for session cookies.
-                    host, path, secure, expires_nt_time_epoch, name, value, enc_value, http_only = item
-                    if (expires_nt_time_epoch == 0):
-                        expires = None
-                    else:
-                        expires = (expires_nt_time_epoch / 1000000) - \
-                            self.UNIX_TO_NT_EPOCH_OFFSET
+            #     for item in cur.fetchall():
+            #         # Per https://github.com/chromium/chromium/blob/main/base/time/time.h#L5-L7,
+            #         # Chromium-based browsers store cookies' expiration timestamps as MICROSECONDS elapsed
+            #         # since the Windows NT epoch (1601-01-01 0:00:00 GMT), or 0 for session cookies.
+            #         #
+            #         # http.cookiejar stores cookies' expiration timestamps as SECONDS since the Unix epoch
+            #         # (1970-01-01 0:00:00 GMT, or None for session cookies.
+            #         host, path, secure, expires_nt_time_epoch, name, value, enc_value, http_only = item
+            #         if (expires_nt_time_epoch == 0):
+            #             expires = None
+            #         else:
+            #             expires = (expires_nt_time_epoch / 1000000) - self.UNIX_TO_NT_EPOCH_OFFSET
 
-                    value = self._decrypt(value, enc_value, has_integrity_check_for_cookie_domain)
-                    c = create_cookie(host, path, secure, expires,
-                                    name, value, http_only)
-                    cj.set_cookie(c)\
+            #         value = self._decrypt(value, enc_value, has_integrity_check_for_cookie_domain)
+            #         c = create_cookie(host, path, secure, expires, name, value, http_only)
+            #         cj.set_cookie(c)
                     
         else:
-            all_cookies = get_all_chrome_based_cookies_wsl(self.bin_path, self.user_data_path)
+            all_cookies = get_all_chrome_based_cookies_wsl(bin_path=self.bin_path, user_data_path=self.user_data_path, domain_name=self.domain_name)
             for item in all_cookies:
                 if self.domain_name and self.domain_name != "":
                     if self.domain_name not in item['domain']:
@@ -699,7 +732,7 @@ class ChromiumBased:
                     host=item['domain'],
                     path=item['path'],
                     secure=item['secure'],
-                    expires=uint64(item['expires']),
+                    expires=int(item['expires'] if (item['expires'] and item['expires'] >= 0) else 0),
                     name=item['name'],
                     value=item['value'],
                     http_only=item['httpOnly'])
@@ -834,10 +867,16 @@ class Chrome(ChromiumBased):
                 'Google\\Chrome{channel}\\User Data\\Local State',
                 channel=['', ' Beta', ' Dev']
             ),
-            'windows_bin_path': _expand_wsl_path(
+            'wsl_bin_path': _expand_wsl_path(
                 {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'windows_user_data': _expand_wsl_path(
+            'wsl_user_data': _expand_wsl_path(
+                {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
+            ),
+            'windows_bin_path': _expand_win_path(
+                {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
+            ),
+            'windows_user_data': _expand_win_path(
                 {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
             ),
             'os_crypt_name': 'chrome',
@@ -894,12 +933,19 @@ class Chromium(ChromiumBased):
             'windows_keys': _genarate_win_paths_chromium(
                 'Chromium\\User Data\\Local State'
             ),
-            'windows_bin_path': _expand_wsl_path(
+            'wsl_bin_path': _expand_wsl_path(
                 {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'windows_user_data': _expand_wsl_path(
+            'wsl_user_data': _expand_wsl_path(
                 {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
-            ),            'os_crypt_name': 'chromium',
+            ),
+            'windows_bin_path': _expand_win_path(
+                {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
+            ),
+            'windows_user_data': _expand_win_path(
+                {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
+            ),      
+            'os_crypt_name': 'chromium',
             'osx_key_service': 'Chromium Safe Storage',
             'osx_key_user': 'Chromium'
         }
@@ -1219,7 +1265,7 @@ class FirefoxBased:
                     cj.set_cookie(FirefoxBased.__create_session_cookie(cookie))
 
     def load(self):
-        cj = http.cookiejar.CookieJar()
+        cj = http.cookiejar.MozillaCookieJar()
         # firefoxbased seems faster with legacy mode
         with _DatabaseConnetion(self.cookie_file, True) as con:
             cur = con.cursor()
@@ -1233,7 +1279,7 @@ class FirefoxBased:
 
             for item in cur.fetchall():
                 host, path, secure, expires, name, value, http_only = item
-                c = create_cookie(host, path, secure, expires,
+                c = create_cookie(host, path, secure, expires ,
                                   name, value, http_only)
                 cj.set_cookie(c)
 
@@ -1483,7 +1529,7 @@ def create_cookie(host, path, secure, expires, name, value, http_only):
     """Shortcut function to create a cookie"""
     # HTTPOnly flag goes in _rest, if present (see https://github.com/python/cpython/pull/17471/files#r511187060)
     return http.cookiejar.Cookie(0, name, value, None, False, host, host.startswith('.'), host.startswith('.'), path,
-                                 True, secure, expires, False, None, None,
+                                 True, secure, expires if expires != None else 0, False, None, None,
                                  {'HTTPOnly': ''} if http_only else {})
 
 
