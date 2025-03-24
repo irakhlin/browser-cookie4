@@ -26,7 +26,7 @@ is_wsl: bool = False
 DEBUG_PORT = 9222
 DEBUG_URL = f'http://localhost:{DEBUG_PORT}/json'
 
-if platform.uname().release.find("microsoft") >= 0 and platform.uname().system.lower() != "windows":
+if (platform.uname().release.find("microsoft") >= 0 and platform.uname().system.lower() != "windows"):
     is_wsl = True
 
 if sys.platform.startswith('linux') or 'bsd' in sys.platform.lower():
@@ -49,8 +49,6 @@ if sys.platform == 'win32' and not is_wsl:
 
 wsl_path_dict: dict = {}
 if is_wsl:
-    import wslwinreg
-    
     cmd = "cat /proc/mounts|grep drvfs"
     ps = subprocess.Popen(cmd,shell=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     win_drives_list = ps.communicate()[0].decode("utf-8").strip()
@@ -99,7 +97,7 @@ def close_browser_wsl(bin_path):
 def close_browser(bin_path):
     proc_name = Path(bin_path).name
     cmd = f"cmd.exe /c 'taskkill /F /IM {proc_name}'"
-    ps = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    ps = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=os.getcwd())
 
 def start_browser_wsl(bin_path, user_data_path):
     windows_user_data_path = _wsl_path_from_wsl(user_data_path)
@@ -107,8 +105,8 @@ def start_browser_wsl(bin_path, user_data_path):
     subprocess.Popen(cmds, shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def start_browser(bin_path, user_data_path):
-    cmds = [f"{bin_path}", "--restore-last-session", f"--remote-debugging-port={DEBUG_PORT}", "--remote-allow-origins=*", "--headless", f"--user-data-dir='{user_data_path}'"]
-    subprocess.Popen(cmds, shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cmds = [f"{bin_path}", "--restore-last-session", f"--remote-debugging-port={DEBUG_PORT}", "--remote-allow-origins=*", "--headless", f"--user-data-dir={user_data_path}"]
+    subprocess.Popen(cmds, shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=os.getcwd())
         
 def get_debug_ws_url():
     session = requests.Session()
@@ -174,7 +172,7 @@ def _windows_group_policy_path():
         from winreg import (HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ,
                             ConnectRegistry, OpenKeyEx, QueryValueEx)
     else:
-        from wslwinreg import (HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ,
+        from wslwinreg2 import (HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ,
                                ConnectRegistry, OpenKeyEx, QueryValueEx)
     try:
         root = ConnectRegistry(None, HKEY_LOCAL_MACHINE)
@@ -243,6 +241,19 @@ def _get_osx_keychain_password(osx_key_service, osx_key_user):
         return CHROMIUM_DEFAULT_PASSWORD     # default password, probably won't work
     return out.strip()
 
+
+def _expand_win_or_wsl_path(path: Union[dict, str]):
+    if not is_wsl:
+        if not isinstance(path, dict):
+            path = {'path': path, 'env': 'APPDATA'}
+        return os.path.join(os.getenv(path['env'], ''), path['path'])
+    else:
+        if not isinstance(path, dict):
+            path = {'path': path, 'env': 'APPDATA'}
+        wsl_env_path = _wsl_get_windows_env(path['env'])
+        sanitized_path = path['path'].replace("\\", "/")
+        
+        return os.path.join(wsl_env_path, sanitized_path)
 
 def _expand_win_path(path: Union[dict, str]):
     if not isinstance(path, dict):
@@ -867,16 +878,16 @@ class Chrome(ChromiumBased):
                 'Google\\Chrome{channel}\\User Data\\Local State',
                 channel=['', ' Beta', ' Dev']
             ),
-            'wsl_bin_path': _expand_wsl_path(
+            'wsl_bin_path': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'wsl_user_data': _expand_wsl_path(
+            'wsl_user_data': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
             ),
-            'windows_bin_path': _expand_win_path(
+            'windows_bin_path': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'windows_user_data': _expand_win_path(
+            'windows_user_data': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
             ),
             'os_crypt_name': 'chrome',
@@ -933,16 +944,16 @@ class Chromium(ChromiumBased):
             'windows_keys': _genarate_win_paths_chromium(
                 'Chromium\\User Data\\Local State'
             ),
-            'wsl_bin_path': _expand_wsl_path(
+            'wsl_bin_path': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'wsl_user_data': _expand_wsl_path(
+            'wsl_user_data': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
             ),
-            'windows_bin_path': _expand_win_path(
+            'windows_bin_path': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'windows_user_data': _expand_win_path(
+            'windows_user_data': _expand_win_or_wsl_path(
                 {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
             ),      
             'os_crypt_name': 'chromium',
@@ -1090,11 +1101,17 @@ class Edge(ChromiumBased):
                 'Microsoft\\Edge{channel}\\User Data\\Local State',
                 channel=['', ' Beta', ' Dev', ' SxS']
             ),
-            'windows_bin_path': _expand_wsl_path(
-                {'path': 'Microsoft\\Edge\\Application\\msedge.exe', 'env': 'PROGRAMFILES(x86)'},
+            'wsl_bin_path': _expand_win_or_wsl_path(
+                {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
             ),
-            'windows_user_data': _expand_wsl_path(
-                {'path': 'Microsoft\\Edge\\User Data', 'env': 'LOCALAPPDATA'},
+            'wsl_user_data': _expand_win_or_wsl_path(
+                {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
+            ),
+            'windows_bin_path': _expand_win_or_wsl_path(
+                {'path': 'Google\\Chrome\\Application\\chrome.exe', 'env': 'PROGRAMFILES'},
+            ),
+            'windows_user_data': _expand_win_or_wsl_path(
+                {'path': 'Google\\Chrome\\User Data', 'env': 'LOCALAPPDATA'},
             ),
             'os_crypt_name': 'chromium',
             'osx_key_service': 'Microsoft Edge Safe Storage',

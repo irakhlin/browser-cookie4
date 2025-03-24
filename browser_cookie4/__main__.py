@@ -13,7 +13,6 @@ def parse_args(args=None):
     p.add_argument('-j', '--json', action='store_true',
                    help="Output JSON with all cookie details, rather than just the cookie's value")
     p.add_argument('domain')
-    p.add_argument('name')
 
     g = p.add_argument_group('Browser selection')
     x = g.add_mutually_exclusive_group()
@@ -47,7 +46,7 @@ def main(args=None):
         p.error(e.args[0])
 
     for cookie in cj:
-        if cookie.domain in (args.domain, '.' + args.domain) and cookie.name == args.name:
+        if cookie.domain in (args.domain, '.' + args.domain):
             if not args.json:
                 print(cookie.value)
             else:
