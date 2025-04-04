@@ -52,7 +52,7 @@ if is_wsl:
     cmd = "cat /proc/mounts|grep drvfs"
     ps = subprocess.Popen(cmd,shell=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     win_drives_list = ps.communicate()[0].decode("utf-8").strip()
-    for drive in win_drives_list.splitlines():
+    for drive in win_drives_list.splitlines()[:2]:
         drive_details = drive.split(';')
         drive_letter = drive_details[0].replace("path=", "").split(':', 1)[0]
         linux_path = drive_details[4].replace("symlinkroot=", "").split(',', 1)[0]
